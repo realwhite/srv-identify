@@ -1,26 +1,9 @@
-// Copyright \d{4} VK Cloud.
-//
-// All Rights Reserved.
-//
-// Licensed under the Apache License, Version 2.0 (the "License"); you may
-// not use this file except in compliance with the License. You may obtain
-// a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
-// WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
-// License for the specific language governing permissions and limitations
-// under the License.
-
-package main
+package identify
 
 import (
 	"context"
 	"encoding/hex"
 	"errors"
-	_ "fmt"
 	"log/slog"
 	"net"
 	"slices"
@@ -74,7 +57,6 @@ type IdentifyResult struct {
 	Model  ResultModel
 }
 
-// Options
 type ServerCredentials struct {
 	Username string
 	Password string
@@ -106,116 +88,134 @@ type Collector interface {
 }
 
 type ServerIdentifier struct {
-	l *slog.Logger
+	l          *slog.Logger
+	collectors []Collector
 }
 
 func NewServerIdentifier(l *slog.Logger) *ServerIdentifier {
 	return &ServerIdentifier{
 		l: l,
+		collectors: []Collector{
+			NewIPMICollector(l),
+			NewRedfishCollector(l),
+		},
 	}
 }
 
 func (id *ServerIdentifier) IdentifyRemote(ctx context.Context, ip net.IP, opts IdentifyOptions) (*IdentifyResult, error) {
-	collectResult := &UnionCollectResult{}
-
-	ipmiCollector := NewIPMICollector(id.l)
-	redfishCollector := NewRedfishCollector(id.l)
-
-	targetCollectorTypes := DefaultCollectorsRemote
+	targetCollectors := DefaultCollectorsRemote
 	if len(opts.Collectors) > 0 {
-		targetCollectorTypes = opts.Collectors
+		targetCollectors = opts.Collectors
 	}
 
-	for _, collector := range []Collector{ipmiCollector, redfishCollector} {
-		if !slices.Contains(targetCollectorTypes, collector.Type()) {
+	collectResult := &UnionCollectResult{}
+
+	for _, collector := range id.collectors {
+		if !slices.Contains(targetCollectors, collector.Type()) {
 			id.l.Debug("collector skipped", "collector", collector.Type())
 
 			continue
 		}
 
-		err := collector.CollectRemote(ctx, collectResult, ip, &opts)
-		if err != nil {
-			id.l.Error("Failed to collect data", "error", err, "collector", collector.Type())
+		if err := collector.CollectRemote(ctx, collectResult, ip, &opts); err != nil {
+			id.l.Error("failed to collect data", "error", err, "collector", collector.Type())
 		}
 	}
 
-	return id.processResult(ctx, collectResult)
+	return id.processResult(collectResult)
 }
 
 func (id *ServerIdentifier) IdentifyLocal(ctx context.Context, opts IdentifyOptions) (*IdentifyResult, error) {
-	collectResult := &UnionCollectResult{}
-
-	ipmiCollector := NewIPMICollector(id.l)
-	redfishCollector := NewRedfishCollector(id.l)
-
-	targetCollectorTypes := DefaultCollectorsLocal
+	targetCollectors := DefaultCollectorsLocal
 	if len(opts.Collectors) > 0 {
-		targetCollectorTypes = opts.Collectors
+		targetCollectors = opts.Collectors
 	}
 
-	for _, collector := range []Collector{ipmiCollector, redfishCollector} {
-		if !slices.Contains(targetCollectorTypes, collector.Type()) {
+	collectResult := &UnionCollectResult{}
+
+	for _, collector := range id.collectors {
+		if !slices.Contains(targetCollectors, collector.Type()) {
 			id.l.Debug("collector skipped", "collector", collector.Type())
 
 			continue
 		}
 
-		err := collector.CollectLocal(ctx, collectResult, &opts)
-		if err != nil {
-			id.l.Error("Failed to collect data", "error", err, "collector", collector.Type())
+		if err := collector.CollectLocal(ctx, collectResult, &opts); err != nil {
+			if errors.Is(err, errCollectNotImplemented) {
+				id.l.Debug("collector not implemented for local", "collector", collector.Type())
+
+				continue
+			}
+
+			id.l.Error("failed to collect data", "error", err, "collector", collector.Type())
 		}
 	}
 
-	return id.processResult(ctx, collectResult)
+	return id.processResult(collectResult)
 }
 
-func (id *ServerIdentifier) makeShortConstant(vendorName string) string {
+func isBlankValue(s string) bool {
+	return strings.EqualFold(s, "") ||
+		strings.EqualFold(s, "null") ||
+		strings.EqualFold(s, "unknown")
+}
+
+func makeShortConstant(vendorName string) string {
 	return strings.SplitN(strings.ToUpper(vendorName), " ", 2)[0]
 }
 
 func (id *ServerIdentifier) mergeVendorSection(collectResult *UnionCollectResult, identifyResult *IdentifyResult) {
 	identifyResult.Vendor = ResultVendor{}
-	vendorCandidates := make(map[string]struct{})
+
+	// Ordered candidates: the first non-blank value becomes Name.
+	// Priority: IPMI FRU Product -> IPMI FRU Board -> Redfish -> IANA -> OUI.
+	var orderedCandidates []string
+	allCandidates := make(map[string]struct{})
+
+	addCandidate := func(name string) {
+		orderedCandidates = append(orderedCandidates, name)
+		if name != "" {
+			allCandidates[name] = struct{}{}
+		}
+	}
 
 	if collectResult.IPMI != nil && collectResult.IPMI.Status != CollectStatusError {
-		vendorCandidates[collectResult.IPMI.Data.FRUBoardMfg] = struct{}{}
-		vendorCandidates[collectResult.IPMI.Data.FRUProductMfg] = struct{}{}
+		addCandidate(collectResult.IPMI.Data.FRUProductMfg)
+		addCandidate(collectResult.IPMI.Data.FRUBoardMfg)
 
 		identifyResult.Vendor.IANAEnterpriseID = collectResult.IPMI.Data.ManufacturerID
-		vendorByIANA, ok := LookupIANANumber(collectResult.IPMI.Data.ManufacturerID)
-		if ok {
-			vendorCandidates[vendorByIANA] = struct{}{}
+		// ManufacturerID=0 means "not set" (Reserved in IANA) — skip it.
+		if id := collectResult.IPMI.Data.ManufacturerID; id != 0 {
+			if vendorByIANA, ok := LookupIANANumber(id); ok {
+				addCandidate(vendorByIANA)
+			}
 		}
 
-		identifyResult.Vendor.MAC = collectResult.IPMI.Data.Mac
-		vendorByMac, ok := LookupOUI(collectResult.IPMI.Data.Mac)
-		if ok {
-			vendorCandidates[vendorByMac] = struct{}{}
+		identifyResult.Vendor.MAC = collectResult.IPMI.Data.MAC
+		if vendorByMac, ok := LookupOUI(collectResult.IPMI.Data.MAC); ok {
+			addCandidate(vendorByMac)
 			identifyResult.Vendor.OUI = vendorByMac
 		}
 	}
 
 	if collectResult.Redfish != nil && collectResult.Redfish.Status != CollectStatusError {
-		vendorCandidates[collectResult.Redfish.Data.Manufacturer] = struct{}{}
+		addCandidate(collectResult.Redfish.Data.Manufacturer)
 	}
 
-	var vendorName string
-	for name := range vendorCandidates {
-		if strings.EqualFold(name, "null") || strings.EqualFold(name, "") || strings.EqualFold(name, "unknown") {
+	for _, name := range orderedCandidates {
+		if isBlankValue(name) {
 			continue
 		}
 
-		vendorName = name
+		identifyResult.Vendor.Name = name
 
 		break
 	}
 
-	identifyResult.Vendor.Name = vendorName
-	identifyResult.Vendor.ShortConstant = id.makeShortConstant(vendorName)
+	identifyResult.Vendor.ShortConstant = makeShortConstant(identifyResult.Vendor.Name)
 
-	var rawNames []string
-
-	for name := range vendorCandidates {
+	rawNames := make([]string, 0, len(allCandidates))
+	for name := range allCandidates {
 		rawNames = append(rawNames, name)
 	}
 
@@ -224,11 +224,12 @@ func (id *ServerIdentifier) mergeVendorSection(collectResult *UnionCollectResult
 
 func (id *ServerIdentifier) mergeModelSection(collectResult *UnionCollectResult, identifyResult *IdentifyResult) {
 	identifyResult.Model = ResultModel{}
+
 	var modelCandidates []string
 	var serialCandidates []string
 
 	if collectResult.IPMI != nil && collectResult.IPMI.Status != CollectStatusError {
-		modelCandidates = append(modelCandidates, collectResult.IPMI.Data.FRUProductName, collectResult.IPMI.Data.FRUProductMfg)
+		modelCandidates = append(modelCandidates, collectResult.IPMI.Data.FRUProductName, collectResult.IPMI.Data.FRUBoardProduct)
 		serialCandidates = append(serialCandidates, collectResult.IPMI.Data.FRUProductSerial)
 	}
 
@@ -238,7 +239,7 @@ func (id *ServerIdentifier) mergeModelSection(collectResult *UnionCollectResult,
 	}
 
 	for _, name := range modelCandidates {
-		if strings.EqualFold(name, "null") || strings.EqualFold(name, "") || strings.EqualFold(name, "unknown") {
+		if isBlankValue(name) {
 			continue
 		}
 		identifyResult.Model.Name = name
@@ -247,21 +248,19 @@ func (id *ServerIdentifier) mergeModelSection(collectResult *UnionCollectResult,
 	}
 
 	for _, serial := range serialCandidates {
-		if strings.EqualFold(serial, "null") || strings.EqualFold(serial, "") || strings.EqualFold(serial, "unknown") {
+		if isBlankValue(serial) {
 			continue
 		}
-
 		identifyResult.Model.SerialNumber = serial
+
+		break
 	}
 }
 
-func (id *ServerIdentifier) processResult(ctx context.Context, collectResult *UnionCollectResult) (*IdentifyResult, error) {
+func (id *ServerIdentifier) processResult(collectResult *UnionCollectResult) (*IdentifyResult, error) {
 	identifyResult := &IdentifyResult{}
 
-	// Vendor section
 	id.mergeVendorSection(collectResult, identifyResult)
-
-	// Model section
 	id.mergeModelSection(collectResult, identifyResult)
 
 	return identifyResult, nil
@@ -272,16 +271,14 @@ func LookupOUI(mac net.HardwareAddr) (string, bool) {
 		return "", false
 	}
 
-	key := hex.EncodeToString(mac[:3])
-	key = strings.ToUpper(key)
-
+	key := strings.ToUpper(hex.EncodeToString(mac[:3]))
 	v, ok := OUIDB[key]
 
 	return v, ok
 }
 
-func LookupIANANumber(vendorId uint32) (string, bool) {
-	v, ok := IANADB[vendorId]
+func LookupIANANumber(vendorID uint32) (string, bool) {
+	v, ok := IANADB[vendorID]
 
 	return v, ok
 }

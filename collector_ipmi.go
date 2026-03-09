@@ -1,23 +1,8 @@
-// Copyright \d{4} VK Cloud.
-//
-// All Rights Reserved.
-//
-// Licensed under the Apache License, Version 2.0 (the "License"); you may
-// not use this file except in compliance with the License. You may obtain
-// a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
-// WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
-// License for the specific language governing permissions and limitations
-// under the License.
-
-package main
+package identify
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -40,14 +25,14 @@ type IPMIData struct {
 	ManufacturerID uint32
 	ProductID      uint32
 
-	// Из FRU (Board Info Area)
+	// From FRU (Board Info Area)
 	FRUBoardMfg     string
 	FRUBoardProduct string
 	FRUBoardSerial  string
 	FRUBoardPN      string
 	FRUBoardMfgDate string
 
-	// Из FRU (Product Info Area)
+	// From FRU (Product Info Area)
 	FRUProductMfg    string
 	FRUProductName   string
 	FRUProductPN     string
@@ -55,13 +40,13 @@ type IPMIData struct {
 	FRUProductAsset  string
 	FRUProductVer    string
 
-	// Из FRU (Chassis Info Area)
+	// From FRU (Chassis Info Area)
 	FRUChassisType   string
 	FRUChassisPN     string
 	FRUChassisSerial string
 
 	// Lan config
-	Mac net.HardwareAddr
+	MAC net.HardwareAddr
 }
 
 type IPMICollector struct {
@@ -95,25 +80,32 @@ func (c *IPMICollector) CollectRemote(ctx context.Context, result *UnionCollectR
 		return fmt.Errorf("failed to connect to ipmi: %w", err)
 	}
 
-	return c.collect(ctx, client, result)
+	c.collect(ctx, client, result)
+
+	return nil
 }
 
 func (c *IPMICollector) CollectLocal(ctx context.Context, result *UnionCollectResult, opts *IdentifyOptions) error {
+	result.IPMI = &IPMIResult{
+		Status: CollectStatusError,
+	}
+
 	client, err := ipmi.NewOpenClient()
 	if err != nil {
 		return fmt.Errorf("failed to create ipmi client: %w", err)
 	}
 
-	client.WithInterface(ipmi.InterfaceLanplus)
 	err = client.Connect(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to connect to ipmi: %w", err)
 	}
 
-	return c.collect(ctx, client, result)
+	c.collect(ctx, client, result)
+
+	return nil
 }
 
-func (c *IPMICollector) collect(ctx context.Context, client *ipmi.Client, result *UnionCollectResult) error {
+func (c *IPMICollector) collect(ctx context.Context, client *ipmi.Client, result *UnionCollectResult) {
 	collectStatus := CollectStatusSuccess
 
 	collectors := []func(context.Context, *ipmi.Client, *UnionCollectResult) error{
@@ -142,8 +134,6 @@ func (c *IPMICollector) collect(ctx context.Context, client *ipmi.Client, result
 	}
 
 	result.IPMI.Status = collectStatus
-
-	return nil
 }
 
 func (c *IPMICollector) collectDeviceID(ctx context.Context, client *ipmi.Client, result *UnionCollectResult) error {
@@ -190,7 +180,8 @@ func (c *IPMICollector) collectFRU(ctx context.Context, client *ipmi.Client, res
 	return nil
 }
 
-// это копия ipmi.GetFRU, но без обработки multirecords area
+// getFRUSafe is a copy of ipmi.GetFRU without multirecords area handling,
+// which can panic on malformed data from some vendors.
 func (c *IPMICollector) getFRUSafe(ctx context.Context, client *ipmi.Client, deviceID uint8) (*ipmi.FRU, error) {
 	fru := &ipmi.FRU{}
 
@@ -253,14 +244,14 @@ func (c *IPMICollector) collectMAC(ctx context.Context, client *ipmi.Client, res
 	}
 
 	if resp == nil {
-		return fmt.Errorf("LanConfigResponse is nil")
+		return errors.New("LanConfigResponse is nil")
 	}
 
 	if resp.MAC == nil {
-		return fmt.Errorf("MAC is nil")
+		return errors.New("MAC is nil")
 	}
 
-	result.IPMI.Data.Mac = resp.MAC.MAC
+	result.IPMI.Data.MAC = resp.MAC.MAC
 
 	return nil
 }

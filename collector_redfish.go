@@ -1,26 +1,11 @@
-// Copyright \d{4} VK Cloud.
-//
-// All Rights Reserved.
-//
-// Licensed under the Apache License, Version 2.0 (the "License"); you may
-// not use this file except in compliance with the License. You may obtain
-// a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
-// WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
-// License for the specific language governing permissions and limitations
-// under the License.
-
-package main
+package identify
 
 import (
 	"context"
 	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -28,11 +13,14 @@ import (
 	"net/http"
 	"net/url"
 	"path"
-
-	"github.com/olekukonko/errors"
+	"time"
 )
 
-const RedfishCollectorType CollectorType = "redfish"
+const (
+	RedfishCollectorType  CollectorType = "redfish"
+	maxResponseBodyBytes  int64         = 1 << 20 // 1 MiB
+	redfishRequestTimeout               = 30 * time.Second
+)
 
 type RedfishResult struct {
 	Status CollectStatus
@@ -67,53 +55,55 @@ type minimalSystemResponse struct {
 	PartNumber   string `json:"PartNumber"`
 }
 
-type AuthTransport struct {
-	Base       http.RoundTripper
-	AuthHeader string
+type authTransport struct {
+	base       http.RoundTripper
+	authHeader string
 }
 
-func (t *AuthTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+func (t *authTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	clone := req.Clone(req.Context())
-	clone.Header.Set("Authorization", t.AuthHeader)
+	clone.Header.Set("Authorization", t.authHeader)
 
-	return t.Base.RoundTrip(clone) //nolint: wrapcheck
+	return t.base.RoundTrip(clone) //nolint: wrapcheck
 }
 
-func buildUniversalTransport(insecure bool) *http.Transport {
-	allCiphers := make([]uint16, 0)
+// buildTransport builds a TLS transport compatible with legacy hardware.
+// When insecure=false — only secure ciphers are used.
+// When insecure=true  — deprecated ciphers are added for compatibility
+// and certificate verification is disabled.
+func buildTransport(insecure bool) *http.Transport {
+	ciphers := make([]uint16, 0, len(tls.CipherSuites()))
 	for _, c := range tls.CipherSuites() {
-		allCiphers = append(allCiphers, c.ID)
+		ciphers = append(ciphers, c.ID)
 	}
-	for _, c := range tls.InsecureCipherSuites() {
-		allCiphers = append(allCiphers, c.ID)
+
+	if insecure {
+		for _, c := range tls.InsecureCipherSuites() {
+			ciphers = append(ciphers, c.ID)
+		}
 	}
 
 	return &http.Transport{
 		TLSClientConfig: &tls.Config{
 			InsecureSkipVerify: insecure, //nolint: gosec
 			MinVersion:         tls.VersionTLS10,
-			CipherSuites:       allCiphers,
+			CipherSuites:       ciphers,
 		},
 		ForceAttemptHTTP2: false,
 	}
 }
 
 func basicAuth(username, password string) string {
-	encoded := base64.StdEncoding.EncodeToString(
-		[]byte(username + ":" + password),
-	)
-
-	return "Basic " + encoded
+	return "Basic " + base64.StdEncoding.EncodeToString([]byte(username+":"+password))
 }
 
-func DefaultHTTPClient(username, password string, insecure bool) *http.Client {
-	baseTransport := buildUniversalTransport(insecure)
-
+func newRedfishHTTPClient(username, password string, insecure bool) *http.Client {
 	return &http.Client{
-		Transport: &AuthTransport{
-			Base:       baseTransport,
-			AuthHeader: basicAuth(username, password),
+		Transport: &authTransport{
+			base:       buildTransport(insecure),
+			authHeader: basicAuth(username, password),
 		},
+		Timeout: redfishRequestTimeout,
 	}
 }
 
@@ -122,9 +112,7 @@ type RedfishCollector struct {
 }
 
 func NewRedfishCollector(l *slog.Logger) *RedfishCollector {
-	return &RedfishCollector{
-		l: l,
-	}
+	return &RedfishCollector{l: l}
 }
 
 func (c *RedfishCollector) Type() CollectorType {
@@ -132,25 +120,22 @@ func (c *RedfishCollector) Type() CollectorType {
 }
 
 func (c *RedfishCollector) CollectRemote(ctx context.Context, result *UnionCollectResult, ip net.IP, opts *IdentifyOptions) error {
-	result.Redfish = &RedfishResult{
-		Status: CollectStatusError,
-	}
-	httpClient := DefaultHTTPClient(opts.Credentials.Username, opts.Credentials.Password, opts.RedfishConfig.Insecure)
+	result.Redfish = &RedfishResult{Status: CollectStatusError}
+
+	client := newRedfishHTTPClient(opts.Credentials.Username, opts.Credentials.Password, opts.RedfishConfig.Insecure)
 
 	host := ip.String()
 	if opts.RedfishConfig.Port > 0 {
 		host = fmt.Sprintf("%s:%d", host, opts.RedfishConfig.Port)
 	}
 
-	urlPath := fmt.Sprintf("%s/redfish/v1/", opts.RedfishConfig.Prefix)
-
-	baseUrl := url.URL{
+	baseURL := url.URL{
 		Scheme: "https",
 		Host:   host,
-		Path:   urlPath,
+		Path:   fmt.Sprintf("%s/redfish/v1/", opts.RedfishConfig.Prefix),
 	}
 
-	redfishVersion, err := c.getRedfishVersion(ctx, httpClient, baseUrl.String())
+	redfishVersion, err := c.getRedfishVersion(ctx, client, baseURL.String())
 	if err != nil {
 		return fmt.Errorf("failed to check redfish availability: %w", err)
 	}
@@ -158,134 +143,26 @@ func (c *RedfishCollector) CollectRemote(ctx context.Context, result *UnionColle
 	result.Redfish.Data.Version = normalizeString(redfishVersion)
 	result.Redfish.Status = CollectStatusPartialError
 
-	systemId, err := c.getSystemId(ctx, httpClient, baseUrl.String())
+	systemID, err := c.getSystemID(ctx, client, baseURL.String())
 	if err != nil {
 		return fmt.Errorf("failed to get system id: %w", err)
 	}
 
-	err = c.collectSystemData(ctx, httpClient, baseUrl.String(), systemId, result)
-	if err != nil {
+	if err = c.collectSystemData(ctx, client, baseURL.String(), systemID, result); err != nil {
 		return fmt.Errorf("failed to collect system data: %w", err)
 	}
+
 	result.Redfish.Status = CollectStatusSuccess
 
 	return nil
 }
 
-func (c *RedfishCollector) CollectLocal(ctx context.Context, result *UnionCollectResult, opts *IdentifyOptions) error {
+func (c *RedfishCollector) CollectLocal(_ context.Context, _ *UnionCollectResult, _ *IdentifyOptions) error {
 	return errCollectNotImplemented
 }
 
-func (c *RedfishCollector) getRedfishVersion(ctx context.Context, client *http.Client, baseUrl string) (string, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseUrl, http.NoBody)
-	if err != nil {
-		return "", fmt.Errorf("failed to create request: %w", err)
-	}
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("failed to execute request: %w", err)
-	}
-
-	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("failed to read response body: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("failed to execute request, status code: %d, body: %s", resp.StatusCode, body)
-	}
-
-	jsonResp := minimalRootResponse{}
-	err = json.Unmarshal(body, &jsonResp)
-	if err != nil {
-		return "", fmt.Errorf("failed to unmarshal response: %w", err)
-	}
-
-	return jsonResp.RedfishVersion, nil
-}
-
-func (c *RedfishCollector) getSystemId(ctx context.Context, client *http.Client, baseUrl string) (string, error) {
-	systemsUrl, err := url.JoinPath(baseUrl, "Systems")
-	if err != nil {
-		return "", fmt.Errorf("failed to create url: %w", err)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, systemsUrl, http.NoBody)
-	if err != nil {
-		return "", fmt.Errorf("failed to create request: %w", err)
-	}
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("failed to execute request: %w", err)
-	}
-
-	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("failed to read response body: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("failed to execute request, status code: %d, body: %s", resp.StatusCode, body)
-	}
-
-	return c.safeParseSystemId(body)
-}
-
-func (c *RedfishCollector) safeParseSystemId(data []byte) (string, error) {
-	var collection systemsCollection
-	if err := json.Unmarshal(data, &collection); err != nil {
-		return "", fmt.Errorf("unmarshal collection: %w", err)
-	}
-
-	if len(collection.Members) == 0 {
-		return "", errors.New("Members field is missing")
-	}
-
-	var odataPath string
-
-	switch collection.Members[0] {
-	case '[':
-		// Стандартный вариант: Members — массив
-		var members []odataID
-		if err := json.Unmarshal(collection.Members, &members); err != nil {
-			return "", fmt.Errorf("unmarshal Members array: %w", err)
-		}
-		if len(members) == 0 {
-			return "", errors.New("Members array is empty")
-		}
-		odataPath = members[0].ID
-
-	case '{':
-		// Нестандартный вариант: Members — объект
-		var member odataID
-		if err := json.Unmarshal(collection.Members, &member); err != nil {
-			return "", fmt.Errorf("unmarshal Members object: %w", err)
-		}
-		odataPath = member.ID
-
-	default:
-		return "", fmt.Errorf("unexpected Members format: %s", string(collection.Members))
-	}
-
-	if odataPath == "" {
-		return "", errors.New("@odata.id is empty")
-	}
-
-	// Из "/redfish/v1/Systems/Self" вытаскиваем "Self"
-	return path.Base(odataPath), nil
-}
-
-func (c *RedfishCollector) collectSystemData(ctx context.Context, client *http.Client, baseUrl, systemID string, result *UnionCollectResult) error {
-	systemUrl, err := url.JoinPath(baseUrl, "Systems", systemID)
-	if err != nil {
-		return fmt.Errorf("failed to create url: %w", err)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, systemUrl, http.NoBody)
+func (c *RedfishCollector) doGet(ctx context.Context, client *http.Client, rawURL string, dst any) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, http.NoBody)
 	if err != nil {
 		return fmt.Errorf("failed to create request: %w", err)
 	}
@@ -296,25 +173,106 @@ func (c *RedfishCollector) collectSystemData(ctx context.Context, client *http.C
 	}
 
 	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBodyBytes))
 	if err != nil {
 		return fmt.Errorf("failed to read response body: %w", err)
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("failed to execute request, status code: %d, body: %s", resp.StatusCode, body)
+		return fmt.Errorf("unexpected status %d: %s", resp.StatusCode, body)
 	}
 
-	jsonResp := minimalSystemResponse{}
-	err = json.Unmarshal(body, &jsonResp)
-	if err != nil {
+	if err = json.Unmarshal(body, dst); err != nil {
 		return fmt.Errorf("failed to unmarshal response: %w", err)
 	}
 
-	result.Redfish.Data.Manufacturer = normalizeString(jsonResp.Manufacturer)
-	result.Redfish.Data.Model = normalizeString(jsonResp.Model)
-	result.Redfish.Data.SerialNumber = normalizeString(jsonResp.SerialNumber)
-	result.Redfish.Data.PartNumber = normalizeString(jsonResp.PartNumber)
+	return nil
+}
+
+func (c *RedfishCollector) getRedfishVersion(ctx context.Context, client *http.Client, baseURL string) (string, error) {
+	var resp minimalRootResponse
+
+	if err := c.doGet(ctx, client, baseURL, &resp); err != nil {
+		return "", err
+	}
+
+	return resp.RedfishVersion, nil
+}
+
+func (c *RedfishCollector) getSystemID(ctx context.Context, client *http.Client, baseURL string) (string, error) {
+	systemsURL, err := url.JoinPath(baseURL, "Systems")
+	if err != nil {
+		return "", fmt.Errorf("failed to build systems url: %w", err)
+	}
+
+	var collection systemsCollection
+
+	if err := c.doGet(ctx, client, systemsURL, &collection); err != nil {
+		return "", err
+	}
+
+	return parseSystemID(collection)
+}
+
+func parseSystemID(collection systemsCollection) (string, error) {
+	if len(collection.Members) == 0 {
+		return "", errors.New("members field is missing")
+	}
+
+	var odataPath string
+
+	switch collection.Members[0] {
+	case '[':
+		// Standard format: Members is an array.
+		var members []odataID
+		if err := json.Unmarshal(collection.Members, &members); err != nil {
+			return "", fmt.Errorf("failed to unmarshal Members array: %w", err)
+		}
+
+		if len(members) == 0 {
+			return "", errors.New("members array is empty")
+		}
+
+		odataPath = members[0].ID
+
+	case '{':
+		// Non-standard format: Members is an object (seen on Quanta and others).
+		var member odataID
+		if err := json.Unmarshal(collection.Members, &member); err != nil {
+			return "", fmt.Errorf("failed to unmarshal Members object: %w", err)
+		}
+
+		odataPath = member.ID
+
+	default:
+		return "", fmt.Errorf("unexpected Members format: %s", string(collection.Members))
+	}
+
+	if odataPath == "" {
+		return "", errors.New("@odata.id is empty")
+	}
+
+	// Extract the last path segment: "/redfish/v1/Systems/Self" → "Self".
+	return path.Base(odataPath), nil
+}
+
+func (c *RedfishCollector) collectSystemData(ctx context.Context, client *http.Client, baseURL, systemID string, result *UnionCollectResult) error {
+	systemURL, err := url.JoinPath(baseURL, "Systems", systemID)
+	if err != nil {
+		return fmt.Errorf("failed to build system url: %w", err)
+	}
+
+	var resp minimalSystemResponse
+
+	if err := c.doGet(ctx, client, systemURL, &resp); err != nil {
+		return err
+	}
+
+	result.Redfish.Data.Manufacturer = normalizeString(resp.Manufacturer)
+	result.Redfish.Data.Model = normalizeString(resp.Model)
+	result.Redfish.Data.SerialNumber = normalizeString(resp.SerialNumber)
+	result.Redfish.Data.PartNumber = normalizeString(resp.PartNumber)
 
 	return nil
 }

@@ -1,211 +1,208 @@
-linters-settings:
-  goimports:
-    local-prefixes: agent
-  gofumpt:
-    extra-rules: false
-    module-path: agent
-  gci:
-    sections:
-      - standard # Standard section: captures all standard packages.
-      - default # Default section: contains all imports that could not be matched to another section type.
-      - localmodule
-    skip-generated: true
-    custom-order: true
-  depguard:
-    rules:
-      main:
-        files:
-          - $all
-        allow:
-          - $gostd
-          - gitlab.corp.mail.ru
-          - github.com
-          - go.uber.org
-          - golang.org
-          - agent
-  dupl:
-    threshold: 150
-  goconst:
-    min-len: 3
-    min-occurrences: 3
-  gocritic:
-    enabled-tags:
-      - diagnostic
-      - experimental
-      - opinionated
-      - performance
-      - style
-    disabled-checks:
-      - unnamedResult
-      - hugeParam # Config heavy, but we want to copy it on call
-      - whyNoLint
-      - rangeValCopy # economy on copies bytes - not good idea now
-      - commentedOutCode # todo 4605 remove here after big deal
-      - commentFormatting
-  gocyclo:
-    min-complexity: 25
-  gocognit:
-    min-complexity: 20
-  mnd:
-    ignored-numbers:
-      - 2
-      - 3
-      - 4
-      - 5
-    checks:
-      - argument
-      - case
-      - condition
-      - return
-  govet:
-    settings:
-      printf:
-        funcs:
-          - Debugf
-          - Infof
-          - Warnf
-          - Errorf
-          - DPanicf
-          - Panicf
-          - Fatalf
-          - Debugw
-          - Infow
-          - Warnw
-          - Errorw
-          - DPanicw
-          - Panicw
-          - Fatalw
-  revive:
-    # see https://github.com/mgechev/revive#available-rules for details.
-    ignore-generated-header: true
-    severity: warning
-    rules:
-      - name: indent-error-flow
-        severity: warning
-      - name: add-constant
-        severity: warning
-        arguments:
-          - maxLitCount: 11
-            allowStrs: '"","error","GET","POST","PUT","DELETE"'
-            allowInts: "0,1,2,3,4"
-            allowFloats: "0.0,0.,1.0,1.,2.0,2."
-  wrapcheck:
-    ignoreSigs:
-      - .Errorf(
-      - errors.New(
-      - errors.Unwrap(
-      - .Wrap(
-      - .Wrapf(
-      - .WithMessage(
-      - .WithMessagef(
-      - .WithStack(
-      - status.Error(
-      - ctx.Err()
-    ignorePackageGlobs:
-      - context
-  errorlint:
-    errorf: true
-    asserts: true
-    comparison: true
-  forbidigo:
-    forbid:
-      - p: ^fmt\.Print.*$
-        msg: "use logger instead of fmt.Print"
-      - p: ^os\.Exit$
-        msg: "os.Exit is not allowed outside of main"
-  testifylint:
-    enable-all: true
-  misspell:
-    locale: US
-  nolintlint:
-    allow-unused: false # report unused nolint directives
-    require-explanation: false
-    require-specific: false
-
-run:
-  timeout: 5m
-
+version: "2"
+output:
+  formats:
+    text:
+      path: stdout
 linters:
-  disable-all: true
+  default: none
   enable:
     - asciicheck
+    - bidichk
     - bodyclose
+    - containedctx
+    - decorder
     - depguard
     - dogsled
     - dupl
+    - durationcheck
     - errcheck
+    - errchkjson
+    - errname
+    - errorlint
     - exhaustive
+    - forbidigo
+    - ginkgolinter
+    - gocheckcompilerdirectives
     - gochecknoinits
+    - gocognit
     - goconst
     - gocritic
     - gocyclo
-    - gofmt
-    - gofumpt
-    - goimports
-    - gci
     - goprintffuncname
     - gosec
-    - gosimple
     - govet
     - ineffassign
+    - loggercheck
+    - makezero
     - misspell
     - mnd
     - nakedret
+    - nilerr
+    - nlreturn
     - noctx
     - nolintlint
     - revive
     - rowserrcheck
+    - sqlclosecheck
     - staticcheck
-    - stylecheck
-    - typecheck
+    - testifylint
     - unconvert
     - unused
-    - whitespace
-    - gocognit
-    - makezero
-    - loggercheck
-    - gocheckcompilerdirectives
-    - bidichk
-    - containedctx
-    - decorder
-    - durationcheck
-    - errchkjson
-    - errname
-    - nlreturn
-    - ginkgolinter
-    - nilerr
-    - sqlclosecheck
     - usestdlibvars
     - wastedassign
+    - whitespace
     - wrapcheck
-    - errorlint
-    - forbidigo
-    - testifylint
-
-output:
-  formats:
-    - format: colored-line-number
-  sort-results: true
-
-issues:
-  exclude-dirs:
-    - internal/generated
-
-  exclude-rules:
-    - path: _test\.go
-      linters:
-        - mnd
-        - goconst
-        - revive
-        - funlen
-        - maintidx
-        - containedctx
-
-    # https://github.com/go-critic/go-critic/issues/926
-    - linters:
-        - gocritic
-      text: "unnecessaryDefer:"
-
-    - linters:
-        - stylecheck
-      text: "ST1003:"
+  settings:
+    depguard:
+      rules:
+        main:
+          files:
+            - $all
+          allow:
+            - $gostd
+            - github.com
+            - go.uber.org
+            - golang.org
+            - server-identify
+    dupl:
+      threshold: 150
+    errorlint:
+      errorf: true
+      asserts: true
+      comparison: true
+    forbidigo:
+      forbid:
+        - pattern: ^fmt\.Print.*$
+          msg: use logger instead of fmt.Print
+        - pattern: ^os\.Exit$
+          msg: os.Exit is not allowed outside of main
+    gocognit:
+      min-complexity: 20
+    goconst:
+      min-len: 3
+      min-occurrences: 3
+    gocritic:
+      disabled-checks:
+        - unnamedResult
+        - hugeParam
+        - whyNoLint
+        - rangeValCopy
+        - commentedOutCode
+        - commentFormatting
+      enabled-tags:
+        - diagnostic
+        - experimental
+        - opinionated
+        - performance
+        - style
+    gocyclo:
+      min-complexity: 25
+    govet:
+      settings:
+        printf:
+          funcs:
+            - Debugf
+            - Infof
+            - Warnf
+            - Errorf
+            - DPanicf
+            - Panicf
+            - Fatalf
+            - Debugw
+            - Infow
+            - Warnw
+            - Errorw
+            - DPanicw
+            - Panicw
+            - Fatalw
+    misspell:
+      locale: US
+    mnd:
+      ignored-numbers:
+        - '1'
+        - '2'
+        - '3'
+      checks:
+        - argument
+        - case
+        - condition
+        - return
+    nolintlint:
+      require-explanation: false
+      require-specific: false
+      allow-unused: false
+    revive:
+      severity: warning
+      rules:
+        - name: indent-error-flow
+          severity: warning
+        - name: add-constant
+          arguments:
+            - allowFloats: 0.0,0.,1.0,1.,2.0,2.
+              allowInts: 0,1,2,3,4
+              allowStrs: '"","error","GET","POST","PUT","DELETE"'
+          severity: warning
+    testifylint:
+      enable-all: true
+    wrapcheck:
+      ignore-sigs:
+        - .Errorf(
+        - errors.New(
+        - errors.Unwrap(
+        - .Wrap(
+        - .Wrapf(
+        - .WithMessage(
+        - .WithMessagef(
+        - .WithStack(
+        - status.Error(
+        - ctx.Err()
+      ignore-package-globs:
+        - context
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+    rules:
+      - linters:
+          - containedctx
+          - funlen
+          - goconst
+          - maintidx
+          - mnd
+          - revive
+          - gocognit
+        path: _test\.go
+      - linters:
+          - gocritic
+        text: 'unnecessaryDefer:'
+      - linters:
+          - staticcheck
+        text: 'ST1003:'
+    paths:
+      - cmd/example
+      - third_party$
+      - builtin$
+      - examples$
+formatters:
+  enable:
+    - gci
+    - gofmt
+    - gofumpt
+    - goimports
+  settings:
+    gci:
+      sections:
+        - standard
+        - default
+        - localmodule
+      custom-order: true
+  exclusions:
+    generated: lax
+    paths:
+      - internal/generated
+      - third_party$
+      - builtin$
+      - examples$

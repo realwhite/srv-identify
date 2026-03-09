@@ -1,4 +1,7 @@
-.PHONY: update-oui update-iana build-linux build-linux-full
+.PHONY: update-oui update-iana build-linux build-linux-full test test-verbose test-race
+
+test:
+	go test -v ./...
 
 update-oui:
 	go run ./_tools/update_oui
