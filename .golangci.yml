@@ -1,0 +1,211 @@
+linters-settings:
+  goimports:
+    local-prefixes: agent
+  gofumpt:
+    extra-rules: false
+    module-path: agent
+  gci:
+    sections:
+      - standard # Standard section: captures all standard packages.
+      - default # Default section: contains all imports that could not be matched to another section type.
+      - localmodule
+    skip-generated: true
+    custom-order: true
+  depguard:
+    rules:
+      main:
+        files:
+          - $all
+        allow:
+          - $gostd
+          - gitlab.corp.mail.ru
+          - github.com
+          - go.uber.org
+          - golang.org
+          - agent
+  dupl:
+    threshold: 150
+  goconst:
+    min-len: 3
+    min-occurrences: 3
+  gocritic:
+    enabled-tags:
+      - diagnostic
+      - experimental
+      - opinionated
+      - performance
+      - style
+    disabled-checks:
+      - unnamedResult
+      - hugeParam # Config heavy, but we want to copy it on call
+      - whyNoLint
+      - rangeValCopy # economy on copies bytes - not good idea now
+      - commentedOutCode # todo 4605 remove here after big deal
+      - commentFormatting
+  gocyclo:
+    min-complexity: 25
+  gocognit:
+    min-complexity: 20
+  mnd:
+    ignored-numbers:
+      - 2
+      - 3
+      - 4
+      - 5
+    checks:
+      - argument
+      - case
+      - condition
+      - return
+  govet:
+    settings:
+      printf:
+        funcs:
+          - Debugf
+          - Infof
+          - Warnf
+          - Errorf
+          - DPanicf
+          - Panicf
+          - Fatalf
+          - Debugw
+          - Infow
+          - Warnw
+          - Errorw
+          - DPanicw
+          - Panicw
+          - Fatalw
+  revive:
+    # see https://github.com/mgechev/revive#available-rules for details.
+    ignore-generated-header: true
+    severity: warning
+    rules:
+      - name: indent-error-flow
+        severity: warning
+      - name: add-constant
+        severity: warning
+        arguments:
+          - maxLitCount: 11
+            allowStrs: '"","error","GET","POST","PUT","DELETE"'
+            allowInts: "0,1,2,3,4"
+            allowFloats: "0.0,0.,1.0,1.,2.0,2."
+  wrapcheck:
+    ignoreSigs:
+      - .Errorf(
+      - errors.New(
+      - errors.Unwrap(
+      - .Wrap(
+      - .Wrapf(
+      - .WithMessage(
+      - .WithMessagef(
+      - .WithStack(
+      - status.Error(
+      - ctx.Err()
+    ignorePackageGlobs:
+      - context
+  errorlint:
+    errorf: true
+    asserts: true
+    comparison: true
+  forbidigo:
+    forbid:
+      - p: ^fmt\.Print.*$
+        msg: "use logger instead of fmt.Print"
+      - p: ^os\.Exit$
+        msg: "os.Exit is not allowed outside of main"
+  testifylint:
+    enable-all: true
+  misspell:
+    locale: US
+  nolintlint:
+    allow-unused: false # report unused nolint directives
+    require-explanation: false
+    require-specific: false
+
+run:
+  timeout: 5m
+
+linters:
+  disable-all: true
+  enable:
+    - asciicheck
+    - bodyclose
+    - depguard
+    - dogsled
+    - dupl
+    - errcheck
+    - exhaustive
+    - gochecknoinits
+    - goconst
+    - gocritic
+    - gocyclo
+    - gofmt
+    - gofumpt
+    - goimports
+    - gci
+    - goprintffuncname
+    - gosec
+    - gosimple
+    - govet
+    - ineffassign
+    - misspell
+    - mnd
+    - nakedret
+    - noctx
+    - nolintlint
+    - revive
+    - rowserrcheck
+    - staticcheck
+    - stylecheck
+    - typecheck
+    - unconvert
+    - unused
+    - whitespace
+    - gocognit
+    - makezero
+    - loggercheck
+    - gocheckcompilerdirectives
+    - bidichk
+    - containedctx
+    - decorder
+    - durationcheck
+    - errchkjson
+    - errname
+    - nlreturn
+    - ginkgolinter
+    - nilerr
+    - sqlclosecheck
+    - usestdlibvars
+    - wastedassign
+    - wrapcheck
+    - errorlint
+    - forbidigo
+    - testifylint
+
+output:
+  formats:
+    - format: colored-line-number
+  sort-results: true
+
+issues:
+  exclude-dirs:
+    - internal/generated
+
+  exclude-rules:
+    - path: _test\.go
+      linters:
+        - mnd
+        - goconst
+        - revive
+        - funlen
+        - maintidx
+        - containedctx
+
+    # https://github.com/go-critic/go-critic/issues/926
+    - linters:
+        - gocritic
+      text: "unnecessaryDefer:"
+
+    - linters:
+        - stylecheck
+      text: "ST1003:"
