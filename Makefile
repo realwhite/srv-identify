@@ -9,8 +9,15 @@ update-oui:
 update-iana:
 	go run ./_tools/update_iana_numbers
 
-build-linux:
-	GOOS=linux GOARCH=amd64 go build -o server-identify .
+build-linux-local:
+	GOOS=linux GOARCH=amd64 go build -o srv-identify-local ./cmd/example/local
 
-build-linux-full: update-oui update-iana
-	GOOS=linux GOARCH=amd64 go build -o server-identify .
+build-linux-local-full: update-oui update-iana
+	GOOS=linux GOARCH=amd64 go build -o srv-identify-local ./cmd/example/local
+
+build-linux-remote:
+	GOOS=linux GOARCH=amd64 go build -o srv-identify-remote ./cmd/example/remote
+
+build-linux-remote-full: update-oui update-iana
+	GOOS=linux GOARCH=amd64 go build -o srv-identify-remote ./cmd/example/remote
+
