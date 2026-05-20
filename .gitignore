@@ -1,2 +1,4 @@
 .claude
+.cache
+.gocache
 srv-identify

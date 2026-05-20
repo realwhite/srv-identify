@@ -7,10 +7,14 @@ import (
 	"log/slog"
 	"net"
 	"slices"
+	"sort"
 	"strings"
+	"unicode"
 )
 
 var errCollectNotImplemented = errors.New("collect not implemented")
+
+const logAttrCollector = "collector"
 
 type CollectStatus string
 
@@ -112,13 +116,13 @@ func (id *ServerIdentifier) IdentifyRemote(ctx context.Context, ip net.IP, opts 
 
 	for _, collector := range id.collectors {
 		if !slices.Contains(targetCollectors, collector.Type()) {
-			id.l.Debug("collector skipped", "collector", collector.Type())
+			id.l.Debug("collector skipped", logAttrCollector, collector.Type())
 
 			continue
 		}
 
 		if err := collector.CollectRemote(ctx, collectResult, ip, &opts); err != nil {
-			id.l.Error("failed to collect data", "error", err, "collector", collector.Type())
+			id.l.Error("failed to collect data", "error", err, logAttrCollector, collector.Type())
 		}
 	}
 
@@ -135,19 +139,19 @@ func (id *ServerIdentifier) IdentifyLocal(ctx context.Context, opts IdentifyOpti
 
 	for _, collector := range id.collectors {
 		if !slices.Contains(targetCollectors, collector.Type()) {
-			id.l.Debug("collector skipped", "collector", collector.Type())
+			id.l.Debug("collector skipped", logAttrCollector, collector.Type())
 
 			continue
 		}
 
 		if err := collector.CollectLocal(ctx, collectResult, &opts); err != nil {
 			if errors.Is(err, errCollectNotImplemented) {
-				id.l.Debug("collector not implemented for local", "collector", collector.Type())
+				id.l.Debug("collector not implemented for local", logAttrCollector, collector.Type())
 
 				continue
 			}
 
-			id.l.Error("failed to collect data", "error", err, "collector", collector.Type())
+			id.l.Error("failed to collect data", "error", err, logAttrCollector, collector.Type())
 		}
 	}
 
@@ -161,7 +165,21 @@ func isBlankValue(s string) bool {
 }
 
 func makeShortConstant(vendorName string) string {
-	return strings.SplitN(strings.ToUpper(vendorName), " ", 2)[0]
+	vendorName = strings.TrimSpace(vendorName)
+	if isBlankValue(vendorName) {
+		return ""
+	}
+
+	var b strings.Builder
+	b.Grow(len(vendorName))
+
+	for _, r := range vendorName {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			b.WriteRune(unicode.ToUpper(r))
+		}
+	}
+
+	return b.String()
 }
 
 func (id *ServerIdentifier) mergeVendorSection(collectResult *UnionCollectResult, identifyResult *IdentifyResult) {
@@ -174,7 +192,8 @@ func (id *ServerIdentifier) mergeVendorSection(collectResult *UnionCollectResult
 
 	addCandidate := func(name string) {
 		orderedCandidates = append(orderedCandidates, name)
-		if name != "" {
+		name = normalizeString(name)
+		if !isBlankValue(name) {
 			allCandidates[name] = struct{}{}
 		}
 	}
@@ -218,6 +237,8 @@ func (id *ServerIdentifier) mergeVendorSection(collectResult *UnionCollectResult
 	for name := range allCandidates {
 		rawNames = append(rawNames, name)
 	}
+
+	sort.Strings(rawNames)
 
 	identifyResult.Vendor.Raw = rawNames
 }

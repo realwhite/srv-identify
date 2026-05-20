@@ -182,7 +182,7 @@ linters:
           - staticcheck
         text: 'ST1003:'
     paths:
-      - cmd/example
+      - cmd/
       - third_party$
       - builtin$
       - examples$

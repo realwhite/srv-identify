@@ -37,7 +37,7 @@ func TestMergeVendorSection(t *testing.T) {
 				},
 			},
 			wantVendorName:  "Dell Inc.",
-			wantShort:       "DELL",
+			wantShort:       "DELLINC",
 			wantRawContains: []string{"Dell Inc."},
 		},
 		{
@@ -81,7 +81,7 @@ func TestMergeVendorSection(t *testing.T) {
 				},
 			},
 			wantVendorName:  "Quanta Computer",
-			wantShort:       "QUANTA",
+			wantShort:       "QUANTACOMPUTER",
 			wantRawContains: []string{"Quanta Computer"},
 		},
 		{
@@ -393,12 +393,18 @@ func TestMakeShortConstant(t *testing.T) {
 		input string
 		want  string
 	}{
-		{"Dell Inc.", "DELL"},
-		{"Hewlett Packard Enterprise", "HEWLETT"},
-		{"Supermicro", "SUPERMICRO"},
+		{"Dell Inc.", "DELLINC"},
+		{"Dell Computer Corporation", "DELLCOMPUTERCORPORATION"},
+		{"Hewlett Packard Enterprise", "HEWLETTPACKARDENTERPRISE"},
+		{"Hewlett Packard Enterprise Co.", "HEWLETTPACKARDENTERPRISECO"},
 		{"HPE", "HPE"},
+		{"Super Micro Computer, Inc.", "SUPERMICROCOMPUTERINC"},
+		{"Supermicro", "SUPERMICRO"},
 		{"", ""},
-		{"  Leading", ""}, // leading spaces are not trimmed — expected behavior
+		{"  Leading", "LEADING"},
+		{"Acme Hardware Ltd.", "ACMEHARDWARELTD"},
+		{"Acme-Hardware, LLC", "ACMEHARDWARELLC"},
+		{" Acme  Hardware ", "ACMEHARDWARE"},
 		{"One", "ONE"},
 	}
 
